@@ -1,0 +1,108 @@
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.functions.RichFlatMapFunction;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.typeinfo.TypeHint;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.connector.kafka.source.KafkaSource;
+import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.util.Collector;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+public class TradeNotionalAggregator {
+
+    public static void main(String[] args) throws Exception {
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // Kafka Source Configuration (Flink 1.17+)
+        KafkaSource<ObjectNode> kafkaSource = KafkaSource.<ObjectNode>builder()
+            .setBootstrapServers("localhost:9092")
+            .setTopics("trades-topic")
+            .setGroupId("trade-notional-aggregator")
+            .setStartingOffsets(OffsetsInitializer.earliest())
+            .setDeserializer(new JsonNodeKafkaDeserializer()) // Custom deserializer
+            .build();
+
+        // Read from Kafka
+        DataStream<ObjectNode> trades = env.fromSource(
+            kafkaSource,
+            WatermarkStrategy.noWatermarks(),
+            "Kafka Source"
+        );
+
+        // Process trades
+        DataStream<Tuple2<String, Double>> notionalByCusip = trades
+            .flatMap(new TradeParser())
+            .keyBy(0) // Key by CUSIP
+            .flatMap(new NotionalAggregator());
+
+        // Print results (for testing)
+        notionalByCusip.print();
+
+        // Execute the job
+        env.execute("Trade Notional Aggregation");
+    }
+
+    // Custom Kafka Deserializer for ObjectNode
+    public static class JsonNodeKafkaDeserializer 
+        implements org.apache.flink.api.common.serialization.DeserializationSchema<ObjectNode> {
+
+        private final ObjectMapper mapper = new ObjectMapper();
+
+        @Override
+        public ObjectNode deserialize(byte[] message) throws IOException {
+            return mapper.readValue(message, ObjectNode.class);
+        }
+
+        @Override
+        public boolean isEndOfStream(ObjectNode nextElement) {
+            return false;
+        }
+
+        @Override
+        public TypeInformation<ObjectNode> getProducedType() {
+            return TypeInformation.of(ObjectNode.class);
+        }
+    }
+
+    // Parses JSON into (CUSIP, Notional)
+    public static class TradeParser extends RichFlatMapFunction<ObjectNode, Tuple2<String, Double>> {
+        @Override
+        public void flatMap(ObjectNode tradeJson, Collector<Tuple2<String, Double>> out) throws Exception {
+            try {
+                String cusip = tradeJson.get("cusip").asText();
+                double notional = tradeJson.get("notional").asDouble();
+                out.collect(new Tuple2<>(cusip, notional));
+            } catch (Exception e) {
+                System.err.println("Failed to parse trade: " + tradeJson);
+            }
+        }
+    }
+
+    // Stateful aggregation of notional by CUSIP
+    public static class NotionalAggregator extends RichFlatMapFunction<Tuple2<String, Double>, Tuple2<String, Double>> {
+        private transient ValueState<Double> totalNotionalState;
+
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            ValueStateDescriptor<Double> descriptor = new ValueStateDescriptor<>(
+                "totalNotional",
+                TypeInformation.of(new TypeHint<Double>() {})
+            );
+            totalNotionalState = getRuntimeContext().getState(descriptor);
+        }
+
+        @Override
+        public void flatMap(Tuple2<String, Double> trade, Collector<Tuple2<String, Double>> out) throws Exception {
+            Double currentTotal = totalNotionalState.value() == null ? 0.0 : totalNotionalState.value();
+            Double newTotal = currentTotal + trade.f1;
+            totalNotionalState.update(newTotal);
+            out.collect(new Tuple2<>(trade.f0, newTotal));
+        }
+    }
+}
