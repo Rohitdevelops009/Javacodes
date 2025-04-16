@@ -1,0 +1,96 @@
+import org.apache.flink.api.common.functions.RichFlatMapFunction;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.util.Collector;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
+
+import java.util.Arrays;
+import java.util.List;
+
+/**
+ * Processes trade JSON strings and calculates running notional totals per CUSIP
+ * Uses in-memory collection as source (no Kafka)
+ */
+public class TradeNotionalAggregator {
+
+    public static void main(String[] args) throws Exception {
+        // Set up Flink environment
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // Sample trade data (in production you'd use a real source)
+        List<String> sampleTrades = Arrays.asList(
+            "{\"tradeNumber\":\"TRADE1\",\"notional\":1000000.50,\"cusip\":\"037833100\"}",
+            "{\"tradeNumber\":\"TRADE2\",\"notional\":2500000.75,\"cusip\":\"037833100\"}",
+            "{\"tradeNumber\":\"TRADE3\",\"notional\":500000.25,\"cusip\":\"59156R10\"}"
+        );
+
+        // Create stream from collection
+        DataStream<String> tradeStream = env.fromCollection(sampleTrades);
+
+        // Process trades
+        tradeStream
+            .flatMap(new TradeParser())
+            .keyBy(0)  // Group by CUSIP (position 0 in tuple)
+            .flatMap(new NotionalAggregator())
+            .print();
+
+        // Execute job
+        env.execute("Trade Notional Aggregation");
+    }
+
+    /**
+     * Parses JSON trade strings into (CUSIP, Notional) tuples
+     */
+    public static class TradeParser extends RichFlatMapFunction<String, Tuple2<String, Double>> {
+        private transient ObjectMapper mapper;
+
+        @Override
+        public void open(Configuration parameters) {
+            mapper = new ObjectMapper();
+        }
+
+        @Override
+        public void flatMap(String tradeJson, Collector<Tuple2<String, Double>> out) {
+            try {
+                JsonNode node = mapper.readTree(tradeJson);
+                String cusip = node.get("cusip").asText();
+                double notional = node.get("notional").asDouble();
+                out.collect(new Tuple2<>(cusip, notional));
+            } catch (Exception e) {
+                System.err.println("Failed to parse trade: " + tradeJson);
+            }
+        }
+    }
+
+    /**
+     * Maintains running total notional per CUSIP using Flink state
+     */
+    public static class NotionalAggregator extends RichFlatMapFunction<Tuple2<String, Double>, Tuple2<String, Double>> {
+        private transient ValueState<Double> totalNotionalState;
+
+        @Override
+        public void open(Configuration parameters) {
+            ValueStateDescriptor<Double> descriptor = 
+                new ValueStateDescriptor<>("totalNotional", Double.class);
+            totalNotionalState = getRuntimeContext().getState(descriptor);
+        }
+
+        @Override
+        public void flatMap(Tuple2<String, Double> trade, Collector<Tuple2<String, Double>> out) throws Exception {
+            Double currentTotal = totalNotionalState.value();
+            if (currentTotal == null) {
+                currentTotal = 0.0;
+            }
+            
+            Double newTotal = currentTotal + trade.f1;
+            totalNotionalState.update(newTotal);
+            
+            out.collect(new Tuple2<>(trade.f0, newTotal));
+        }
+    }
+}
