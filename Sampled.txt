@@ -1,0 +1,83 @@
+package com.flink.job;
+
+import cat.domain.Position;
+import com.wellsfargo.cat.adapters.JsonConverter;
+
+import jakarta.annotation.Nullable;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.ReduceFunction;
+import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.connector.kafka.source.KafkaSource;
+import org.apache.flink.connector.kafka.sink.KafkaSink;
+import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+
+import java.util.Properties;
+
+public class JobProcessing {
+
+    public static void main(String[] args) throws Exception {
+
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // Kafka Source
+        KafkaSource<String> source = KafkaSource.<String>builder()
+                .setBootstrapServers("ent-kafka-dev101.wellsfargo.com:49092")
+                .setTopics("icat.tradereceiver.camm")
+                .setGroupId("icat-tradereceiver-C61")
+                .setValueOnlyDeserializer(new SimpleStringSchema())
+                .build();
+
+        DataStream<String> kafkaStream = env.fromSource(source, WatermarkStrategy.noWatermarks(), "Kafka Source");
+
+        // JSON Deserialization
+        DataStream<Position> positionStream = kafkaStream.map(new MapFunction<String, Position>() {
+            private transient JsonConverter<Position> jsonConverter;
+
+            @Override
+            public Position map(String value) throws Exception {
+                if (jsonConverter == null) {
+                    jsonConverter = new JsonConverter<>();
+                }
+                return jsonConverter.deserialize(value, Position.class);
+            }
+        });
+
+        // Aggregation
+        DataStream<Position> aggregatedStream = positionStream
+                .keyBy(position -> position.getKey().toString())
+                .reduce(new PositionReducer());
+
+        // Serialization
+        DataStream<String> serializedStream = aggregatedStream.map(new MapFunction<Position, String>() {
+            @Override
+            public String map(Position p1) {
+                return "Aggregated Today Traded " + p1.getTodayTradedCost() + " for Key " + p1.getKey().toString();
+            }
+        });
+
+        // Kafka Sink
+        KafkaSink<String> sink = KafkaSink.<String>builder()
+                .setBootstrapServers("ent-kafka-dev101.wellsfargo.com:49092")
+                .setRecordSerializer(KafkaRecordSerializationSchema.builder()
+                        .setTopic("icat.trade.events")
+                        .setValueSerializationSchema(new SimpleStringSchema())
+                        .build())
+                .build();
+
+        serializedStream.sinkTo(sink);
+
+        env.execute("Position Kafka Receiver");
+    }
+
+    public static class PositionReducer implements ReduceFunction<Position> {
+        @Override
+        public Position reduce(Position p1, Position p2) {
+            p1.setTodayTradedCost(p1.getTodayTradedCost() + p2.getTodayTradedCost());
+            System.out.println("Aggregated Today Traded: " + p1.getTodayTradedCost());
+            return p1;
+        }
+    }
+}
