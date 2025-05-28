@@ -1,0 +1,32 @@
+1) Successes and Achievements (Aligned to Goals)
+🎯 Drive Innovation & Continuous Learning
+• Completed 80+ hours of learning in emerging technologies like Redis, MongoDB, Flink, and Java 17.
+• Built a Redis + MongoDB caching POC, supporting long-term architecture scalability.
+• Successfully executed a Flink POC by setting up and running a Flink cluster, showcasing readiness for event-stream processing.
+• Delivered a GitHub Copilot session across the LOB through Tugboat Talks and received positive feedback from senior leaders.
+• Participated in internal knowledge sharing and continuous learning efforts through hands-on implementations and tech discussions.
+🤖 Leverage GenAI to Enhance Productivity
+• Participated in the GenAI Hackathon, building a GenAI Orchestrator to automate email and document triage/routing.
+• Actively used GitHub Copilot to improve code efficiency and team productivity.
+• Contributed to automation by onboarding Karate test automation across all microservices with robust test cases.
+• Took initiative to promote GenAI adoption via team sessions and live examples.
+🔐 Secure & Stable Environment
+• Remediated all vulnerabilities within SLA, including securing database connections with TLS and enabling secure Solace integration.
+• Worked with platform teams to resolve a critical local debugging issue, unblocking the entire development team.
+• Completed critical NFRs as part of OCP migration to ensure performance, availability, and compliance.
+🚀 Business/Technology Transformation
+• Successfully executed TAS to OCP migration in all non-prod environments, aligning with tech modernization.
+• Provisioned a MongoDB cluster for new services as part of our infrastructure evolution.
+• Actively engaged in TRACE-related discussions, helping bridge business and technical goals.
+• Contributed to the Java 17 upgrade for modernization and long-term support.
+• Received the Manager’s Spotlight Award for high-impact delivery across multiple areas.
+2) Areas of Focus (Aligned to Goals)
+• Continue innovation by scaling caching solutions and onboarding Apache Flink to OCP.
+• Expand GenAI productivity by building more automated tools and encouraging broader adoption within the team.
+• Maintain secure and stable systems by staying ahead on vulnerability remediation and enforcing best practices.
+• Drive OCP production rollout to complete the cloud transformation with a focus on zero disruption and high quality.
+• Sustain active engagement in TRACE to align ongoing technical work with evolving business objectives.
+3) Overall Summary
+• Delivered tangible results aligned with strategic goals in innovation, AI adoption, security, and transformation.
+• Earned the Manager’s Spotlight Award for demonstrated leadership and delivery.
+• Will continue driving forward-looking initiatives with a focus on scalable tech, secure environments, and value-driven solutions in the second half of 2025.
