@@ -1,0 +1,118 @@
+package com.wellsfargo.cat.flink.job;
+
+import com.wellsfargo.cat.domain.Position;
+import com.wellsfargo.cat.adapters.JsonConverter;
+
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.ReduceFunction;
+import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
+import org.apache.flink.connector.kafka.sink.KafkaSink;
+import org.apache.flink.connector.kafka.source.KafkaSource;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import java.util.Properties;
+
+@Component
+public class JobProcessing {
+
+    @Value("${CAT_SSL_KEYSTORE}")
+    private String sslKeystore;
+
+    @Value("${CAT_KEYSTORE_PASSWORD}")
+    private String keystorePassword;
+
+    public void executeJob() throws Exception {
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // Optional but recommended for non-POJO classes
+        env.getConfig().registerKryoType(Position.class);
+
+        KafkaSource<String> source = KafkaSource.<String>builder()
+                .setBootstrapServers("ent-kafka-dev101.wellsfargo.com:49092")
+                .setTopics("icat.trade.confirmations")
+                .setGroupId("icat-tradereceiver-C61")
+                .setProperty("security.protocol", "SSL")
+                .setProperty("ssl.keystore.location", sslKeystore)
+                .setProperty("ssl.keystore.password", keystorePassword)
+                .setValueOnlyDeserializer(new SimpleStringSchema())
+                .build();
+
+        DataStream<String> kafkaStream = env.fromSource(
+                source,
+                WatermarkStrategy.noWatermarks(),
+                "KafkaSource"
+        );
+
+        // JSON to Position conversion, avoiding POJO detection
+        DataStream<Position> positionStream = kafkaStream
+                .map(new MapFunction<String, Position>() {
+                    private transient JsonConverter<Position> jsonConverter;
+
+                    @Override
+                    public Position map(String value) throws Exception {
+                        if (jsonConverter == null) {
+                            jsonConverter = new JsonConverter<>();
+                        }
+                        return jsonConverter.deserialize(value, Position.class);
+                    }
+                })
+                .returns(TypeInformation.of(Position.class)); // 👈 prevent POJO detection
+
+        // Safe keying logic with fallback key
+        DataStream<Position> aggregatedStream = positionStream
+                .keyBy(position -> {
+                    Object key = position.getKey();
+                    return key != null ? key.toString() : "UNKNOWN_KEY";
+                })
+                .reduce(new PositionReducer())
+                .returns(TypeInformation.of(Position.class)); // 👈 reinforce non-POJO use
+
+        // Map to output string
+        DataStream<String> serializedStream = aggregatedStream
+                .map(new MapFunction<Position, String>() {
+                    @Override
+                    public String map(Position p1) {
+                        String key = (p1.getKey() != null) ? p1.getKey().toString() : "UNKNOWN_KEY";
+                        return "Aggregated Today Traded " + p1.getTodayTradedCost() + " for Key " + key;
+                    }
+                });
+
+        KafkaSink<String> sink = KafkaSink.<String>builder()
+                .setBootstrapServers("ent-kafka-dev101.wellsfargo.com:49092")
+                .setKafkaProducerConfig(getKafkaProperties())
+                .setRecordSerializer(KafkaRecordSerializationSchema.builder()
+                        .setTopic("icat.trade.events")
+                        .setValueSerializationSchema(new SimpleStringSchema())
+                        .build())
+                .build();
+
+        serializedStream.sinkTo(sink);
+
+        env.execute("Position Kafka Receiver");
+    }
+
+    private Properties getKafkaProperties() {
+        Properties properties = new Properties();
+        properties.setProperty("security.protocol", "SSL");
+        properties.setProperty("ssl.keystore.location", sslKeystore);
+        properties.setProperty("ssl.keystore.password", keystorePassword);
+        return properties;
+    }
+
+    // Reduce Function: handles non-POJO Position objects
+    public static class PositionReducer implements ReduceFunction<Position> {
+        @Override
+        public Position reduce(Position p1, Position p2) {
+            double total = p1.getTodayTradedCost() + p2.getTodayTradedCost();
+            p1.setTodayTradedCost(total);
+            System.out.println("Aggregated Today Traded " + total);
+            return p1;
+        }
+    }
+}
