@@ -1,0 +1,179 @@
+/upload-pdf        → store file, split into chunks, push chunks for async embedding
+/embeddings-job    → async worker picks chunks → calls internal embedding API → stores vectors
+/vector/add        → stores vector
+/vector/search     → search FAISS
+/ask               → create query embedding → search → call internal LLM → return answer
+
+INTERNAL_EMBED_URL = "https://internal.api.bank.com/embeddings"
+INTERNAL_LLM_URL   = "https://internal.api.bank.com/llm"
+
+# app.py
+
+import os
+import json
+import numpy as np
+import faiss
+import fitz  # PyMuPDF for PDF parsing
+import uuid
+from fastapi import FastAPI, UploadFile, BackgroundTasks
+from pydantic import BaseModel
+from typing import List
+import requests
+
+# ---------------- CONFIG -------------------
+INTERNAL_EMBED_URL = "https://internal.api.bank.com/embeddings"
+INTERNAL_LLM_URL   = "https://internal.api.bank.com/llm"
+
+INDEX_PATH = "vector_store/index.faiss"
+META_PATH  = "vector_store/metadata.json"
+
+os.makedirs("vector_store", exist_ok=True)
+
+# ---------------- LOAD DATA ----------------
+try:
+    metadata = json.load(open(META_PATH))
+except:
+    metadata = {}
+
+try:
+    index = faiss.read_index(INDEX_PATH)
+except:
+    index = None
+
+# ---------------- UTILS --------------------
+def save_index():
+    faiss.write_index(index, INDEX_PATH)
+
+def save_metadata():
+    json.dump(metadata, open(META_PATH, "w"), indent=2)
+
+def call_internal_embedding_api(text: str):
+    resp = requests.post(INTERNAL_EMBED_URL, json={"text": text})
+    return np.array(resp.json()["embedding"], dtype="float32")
+
+def call_internal_llm_api(prompt: str):
+    resp = requests.post(INTERNAL_LLM_URL, json={"prompt": prompt})
+    return resp.json()["response"]
+
+# ----------------- CHUNKING -----------------
+def chunk_text(text: str, chunk_size=500, overlap=50):
+    words = text.split()
+    chunks = []
+    start = 0
+
+    while start < len(words):
+        end = start + chunk_size
+        chunk = " ".join(words[start:end])
+        chunks.append(chunk)
+        start = end - overlap
+
+    return chunks
+
+def extract_pdf_text(pdf_path: str):
+    doc = fitz.open(pdf_path)
+    text = ""
+    for page in doc:
+        text += page.get_text()
+    return text
+
+# --------- ASYNC EMBEDDING WORKER ----------
+def process_chunks_async(chunks: List[str]):
+    global index
+
+    for chunk in chunks:
+        emb = call_internal_embedding_api(chunk)
+        emb = emb.reshape(1, -1)
+
+        # Create FAISS index if not exists
+        if index is None:
+            index = faiss.IndexFlatL2(emb.shape[1])
+
+        index.add(emb)
+
+        # Add metadata
+        chunk_id = str(uuid.uuid4())
+        metadata[chunk_id] = {"text": chunk}
+
+    save_index()
+    save_metadata()
+
+# ---------------- API SCHEMAS --------------
+class SearchRequest(BaseModel):
+    embedding: List[float]
+    top_k: int = 5
+
+class AskRequest(BaseModel):
+    question: str
+
+# ---------------- FASTAPI APP --------------
+app = FastAPI()
+
+# ----------- 1. UPLOAD PDF -----------------
+@app.post("/upload-pdf")
+async def upload_pdf(file: UploadFile, background: BackgroundTasks):
+    pdf_path = f"vector_store/{file.filename}"
+    with open(pdf_path, "wb") as f:
+        f.write(await file.read())
+
+    # Extract & chunk PDF text
+    text = extract_pdf_text(pdf_path)
+    chunks = chunk_text(text)
+
+    # Async job -> embedding + vector store
+    background.add_task(process_chunks_async, chunks)
+
+    return {"status": "processing", "chunks": len(chunks)}
+
+# ----------- 2. VECTOR SEARCH --------------
+@app.post("/vector/search")
+def search(req: SearchRequest):
+    global index
+    if index is None:
+        return {"results": []}
+
+    emb = np.array(req.embedding, dtype="float32").reshape(1, -1)
+    distances, ids = index.search(emb, req.top_k)
+
+    keys = list(metadata.keys())
+    results = []
+
+    for i, dist in zip(ids[0], distances[0]):
+        if i == -1: 
+            continue
+        key = keys[i]
+        results.append({
+            "id": key,
+            "score": float(dist),
+            "metadata": metadata[key]
+        })
+
+    return {"results": results}
+
+# ----------- 3. ASK ENDPOINT (AUTO-RAG) ----
+@app.post("/ask")
+def ask(req: AskRequest):
+    # Step 1: embedding
+    q_emb = call_internal_embedding_api(req.question)
+
+    # Step 2: search
+    srch = search(SearchRequest(embedding=q_emb.tolist()))
+
+    # Step 3: build context
+    context = "\n".join([r["metadata"]["text"] for r in srch["results"]])
+
+    # Step 4: internal LLM call
+    prompt = f"Context:\n{context}\n\nQuestion: {req.question}\nAnswer:"
+    answer = call_internal_llm_api(prompt)
+
+    return {"answer": answer}
+
+Requirements.txt:
+
+fastapi
+uvicorn
+faiss-cpu
+numpy
+PyMuPDF
+requests
+
+POST /upload-pdf
